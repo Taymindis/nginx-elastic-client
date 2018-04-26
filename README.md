@@ -9,8 +9,8 @@ Table of Contents
 * [Introduction](#introduction)
 * [Usage](#usage)
 * [Installation](#installation)
-* [Sample Application Development](#sample-application-development)
 * [Test](#test)
+* [Why need this](#whyneedthis)
 * [Support](#support)
 * [Copyright & License](#copyright--license)
 
@@ -224,6 +224,22 @@ cd /path/to/nginx-elastic-client
 export PATH=/path/to/nginx-dirname:$PATH 
 sudo TEST_NGINX_SLEEP=0.3 prove t
 ```
+
+[Back to TOC](#table-of-contents)
+
+
+Why need this
+==============
+
+Not everyone knows how to query elasticsearch, some client might prefer pass the argument rather than query themselves.
+
+The query inside the nginx.conf has version controlled, maintained, tracked and it's transparent to every of your team member. Central based and pass to multiple elastic server.
+
+Known issue faster, make change 1 to every client, if many client has their on client query logic, the issue will be hard to maintained.
+
+Client can be Zero Down time! nginx -s reload make the changed.
+
+Nginx is Reliable proxy server.
 
 [Back to TOC](#table-of-contents)
 
