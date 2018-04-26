@@ -239,7 +239,7 @@ Known issue faster, make change 1 to every client, if many client has their on c
 
 Client can be Zero Down time! nginx -s reload make the changed.
 
-Nginx is Reliable proxy server.
+Nginx is reliable proxy server, the client is auto load-balance upstream to elasticsearch server.
 
 [Back to TOC](#table-of-contents)
 
