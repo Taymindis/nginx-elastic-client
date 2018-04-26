@@ -47,6 +47,10 @@ extern ngx_module_t  ngx_http_proxy_module;
 #define Q_SOURCE_ONLY "?filter_path=hits.total,hits.hits._source"
 #define SOURCE_ONLY_LEN 41
 
+#define A_INDEX_DOCLIST "&filter_path=hits.hits._index,hits.hits._source&sort=_index:asc"
+#define Q_INDEX_DOCLIST "?filter_path=hits.hits._index,hits.hits._source&sort=_index:asc"
+#define INDEX_DOCLIST_LEN 63
+
 #define CLEAN_BUF(b)                    \
     cl->buf->pos = cl->buf->start;      \
     cl->buf->last = cl->buf->start;     \
@@ -79,20 +83,58 @@ static char *ngx_conf_elastic_client_set_query_slot(ngx_conf_t *cf, ngx_command_
 static char *ngx_conf_elastic_client_set_enum_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf, ngx_uint_t varargs);
 static char *ngx_conf_elastic_client_proxy_pass_command(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_http_elastic_client_access_handler(ngx_http_request_t *r);
-// static ngx_int_t ngx_http_elastic_client_header_filter(ngx_http_request_t *r);
-// static ngx_int_t ngx_http_elastic_client_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
+static ngx_int_t ngx_http_elastic_client_header_filter(ngx_http_request_t *r);
+static ngx_int_t ngx_http_elastic_client_body_filter(ngx_http_request_t *r, ngx_chain_t *in);
 
-// static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
-// static ngx_http_output_body_filter_pt    ngx_http_next_body_filter;
+static ngx_http_output_header_filter_pt  ngx_http_next_header_filter;
+static ngx_http_output_body_filter_pt    ngx_http_next_body_filter;
 
 #define NGX_HTTP_ELASTIC_CLIENT_SKIPMETA_RESP 905
 #define NGX_HTTP_ELASTIC_CLIENT_SOURCEONLY_RESP 906
+#define NGX_HTTP_ELASTIC_CLIENT_INDEXDOCLIST_RESP 907
 #define NGX_HTTP_ELASTIC_CLIENT_RESP_OPT_OFF 0
+
+static ngx_flag_t index_docs_enabled = 0;
+#define FIRST_INDEX "[{\"_index\":\""
+#define SIZEOF_FIRSTINDEX 12
+#define FOLLOW_INDEX ",{\"_index\":\""
+#define SIZEOF_FOLLOWINDEX 12
+#define _SOURCE ",\"_source\":"
+#define SIZEOF_SOURCE 11
+
+#define ARRAY_BRACKET_OPEN "["
+#define ARRAY_BRACKET_CLOSED "]"
+#define OBJ_BRACKET_OPEN "{"
+#define OBJ_BRACKET_CLOSED "}"
+#define COMMA ","
+#define DOUBLE_QUOTE "\""
+#define DOUBLE_QUOTE_COLON "\":"
+#define COLON ":"
+
+
+void *ngx_elasic_client_index_realloc(ngx_http_request_t *r,  void *ptr, size_t old_length, size_t new_length)
+{
+    void *ptrNew = ngx_palloc(r->pool, new_length);
+    if (ptrNew) {
+        memcpy(ptrNew, ptr, old_length);
+        ngx_pfree(r->pool, ptr); // free with pool
+    }
+    return ptrNew;
+}
+
+#define is_index_existed(__index_buckets__, __index_size__, __index__, __index_len__) ({\
+size_t z, existed=0;\
+ngx_str_t *index_val = &__index_buckets__[0];\
+for(z=0;z<__index_size__;z++,index_val++){\
+if(index_val->len == __index_len__ && ngx_strncmp(__index__, index_val->data, __index_len__)==0){\
+    existed=1; break;\
+}}\
+existed;})
 
 static ngx_conf_enum_t ngx_http_elastic_client_resp_opt[] = {
     { ngx_string("skipmeta"), NGX_HTTP_ELASTIC_CLIENT_SKIPMETA_RESP },
     { ngx_string("source"), NGX_HTTP_ELASTIC_CLIENT_SOURCEONLY_RESP },
-    //  { ngx_string("doctype_json"), NGX_HTTP_ELASTIC_CLIENT_DOCTYPEJSON_RESP },
+    { ngx_string("index_docs"), NGX_HTTP_ELASTIC_CLIENT_INDEXDOCLIST_RESP },
     { ngx_null_string, 0 }
 };
 
@@ -188,22 +230,55 @@ ngx_http_elastic_client_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child
 static ngx_int_t
 ngx_http_elastic_client_access_handler(ngx_http_request_t *r)
 {
-    ngx_http_elastic_client_loc_conf_t  *hwlcf;
+    ngx_http_elastic_client_loc_conf_t  *eclcf;
     ngx_str_t                           http_method;
     ngx_str_t                           index_path;
     u_char                              *p/*, *target_opt*/;
     size_t                              len/*, target_opt_len*/;
 
 
-    hwlcf = ngx_http_get_module_loc_conf(r, ngx_http_elastic_client_module);
+    eclcf = ngx_http_get_module_loc_conf(r, ngx_http_elastic_client_module);
 
-    if (hwlcf->index_n_path) {
-        if (ngx_http_complex_value(r, hwlcf->req_method, &http_method) != NGX_OK ||
-                ngx_http_complex_value(r, hwlcf->index_n_path, &index_path) != NGX_OK) {
+    if (eclcf->index_n_path) {
+        if (ngx_http_complex_value(r, eclcf->req_method, &http_method) != NGX_OK ||
+                ngx_http_complex_value(r, eclcf->index_n_path, &index_path) != NGX_OK) {
             return NGX_ERROR;
         }
 
-        if (hwlcf->resp_opt == NGX_HTTP_ELASTIC_CLIENT_SKIPMETA_RESP) {
+        // if (eclcf->resp_opt == NGX_HTTP_ELASTIC_CLIENT_SKIPMETA_RESP) {
+        //     if (ngx_strchr(index_path.data, '?')) {
+        //         len = index_path.len + SKIP_METADATA_LEN;
+        //         p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
+        //         p = ngx_copy(p, index_path.data, index_path.len);
+        //         p = ngx_copy(p, A_SKIP_METADATA, SKIP_METADATA_LEN);
+        //         r->unparsed_uri.len = len;
+        //     } else {
+        //         len = index_path.len + SKIP_METADATA_LEN;
+        //         p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
+        //         p = ngx_copy(p, index_path.data, index_path.len);
+        //         p = ngx_copy(p, Q_SKIP_METADATA, SKIP_METADATA_LEN);
+        //         r->unparsed_uri.len = len;
+        //     }
+        // } else if (eclcf->resp_opt == NGX_HTTP_ELASTIC_CLIENT_SOURCEONLY_RESP) {
+        //     if (ngx_strchr(index_path.data, '?')) {
+        //         len = index_path.len + SOURCE_ONLY_LEN;
+        //         p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
+        //         p = ngx_copy(p, index_path.data, index_path.len);
+        //         p = ngx_copy(p, A_SOURCE_ONLY, SOURCE_ONLY_LEN);
+        //         r->unparsed_uri.len = len;
+        //     } else {
+        //         len = index_path.len + SOURCE_ONLY_LEN;
+        //         p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
+        //         p = ngx_copy(p, index_path.data, index_path.len);
+        //         p = ngx_copy(p, Q_SOURCE_ONLY, SOURCE_ONLY_LEN);
+        //         r->unparsed_uri.len = len;
+        //     }
+        // } else {
+        //     r->unparsed_uri = index_path;
+        // }
+
+        switch (eclcf->resp_opt) {
+        case NGX_HTTP_ELASTIC_CLIENT_SKIPMETA_RESP:
             if (ngx_strchr(index_path.data, '?')) {
                 len = index_path.len + SKIP_METADATA_LEN;
                 p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
@@ -217,7 +292,8 @@ ngx_http_elastic_client_access_handler(ngx_http_request_t *r)
                 p = ngx_copy(p, Q_SKIP_METADATA, SKIP_METADATA_LEN);
                 r->unparsed_uri.len = len;
             }
-        } else if (hwlcf->resp_opt == NGX_HTTP_ELASTIC_CLIENT_SOURCEONLY_RESP) {
+            break;
+        case NGX_HTTP_ELASTIC_CLIENT_SOURCEONLY_RESP:
             if (ngx_strchr(index_path.data, '?')) {
                 len = index_path.len + SOURCE_ONLY_LEN;
                 p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
@@ -231,10 +307,25 @@ ngx_http_elastic_client_access_handler(ngx_http_request_t *r)
                 p = ngx_copy(p, Q_SOURCE_ONLY, SOURCE_ONLY_LEN);
                 r->unparsed_uri.len = len;
             }
-        } else {
+            break;
+        case NGX_HTTP_ELASTIC_CLIENT_INDEXDOCLIST_RESP:
+            if (ngx_strchr(index_path.data, '?')) {
+                len = index_path.len + INDEX_DOCLIST_LEN;
+                p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
+                p = ngx_copy(p, index_path.data, index_path.len);
+                p = ngx_copy(p, A_INDEX_DOCLIST, INDEX_DOCLIST_LEN);
+                r->unparsed_uri.len = len;
+            } else {
+                len = index_path.len + INDEX_DOCLIST_LEN;
+                p = r->unparsed_uri.data = ngx_palloc(r->pool, len);
+                p = ngx_copy(p, index_path.data, index_path.len);
+                p = ngx_copy(p, Q_INDEX_DOCLIST, INDEX_DOCLIST_LEN);
+                r->unparsed_uri.len = len;
+            }
+            break;
+        default:
             r->unparsed_uri = index_path;
         }
-        
         r->method_name = http_method;
 
         // ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "uri is =%V ", &r->unparsed_uri);
@@ -245,11 +336,13 @@ ngx_http_elastic_client_access_handler(ngx_http_request_t *r)
 
 static ngx_int_t
 ngx_http_elastic_client_init(ngx_conf_t *cf) {
-    // ngx_http_next_header_filter = ngx_http_top_header_filter;
-    // ngx_http_top_header_filter = ngx_http_elastic_client_header_filter;
+    if (index_docs_enabled) {
+        ngx_http_next_header_filter = ngx_http_top_header_filter;
+        ngx_http_top_header_filter = ngx_http_elastic_client_header_filter;
 
-    // ngx_http_next_body_filter = ngx_http_top_body_filter;
-    // ngx_http_top_body_filter = ngx_http_elastic_client_body_filter;
+        ngx_http_next_body_filter = ngx_http_top_body_filter;
+        ngx_http_top_body_filter = ngx_http_elastic_client_body_filter;
+    }
 
     ngx_http_handler_pt        *h;
     ngx_http_core_main_conf_t  *cmcf;
@@ -337,14 +430,14 @@ ELASTIC_ERROR_CONF:
 
 static char *
 ngx_conf_elastic_client_set_path_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
-    ngx_http_elastic_client_loc_conf_t *hwlcf = conf;
+    ngx_http_elastic_client_loc_conf_t *eclcf = conf;
 
     ngx_str_t                         *value;
     ngx_http_complex_value_t          **cv;
     ngx_http_compile_complex_value_t   ccv;
     char                              *rv;
 
-    cv = &hwlcf->req_method;
+    cv = &eclcf->req_method;
 
     if (*cv != NGX_CONF_UNSET_PTR) {
         return "is duplicate";
@@ -382,7 +475,7 @@ ngx_conf_elastic_client_set_path_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *
     }
 
     // index path complex value compilation
-    cv = &hwlcf->index_n_path;
+    cv = &eclcf->index_n_path;
 
     if (*cv != NGX_CONF_UNSET_PTR) {
         return "is duplicate";
@@ -447,186 +540,238 @@ ngx_conf_elastic_client_set_enum_slot(ngx_conf_t *cf, ngx_command_t *cmd, void *
 
         *np = e[i].value;
 
+        if ( ngx_strcmp(value[varargs].data, "index_docs" ) == 0 ) {
+            index_docs_enabled = 1;
+        }
+
         return NGX_CONF_OK;
     }
 
     ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                       "invalid value \"%s\", opt: skipmeta, source", value[varargs].data);
+                       "invalid value \"%s\", opts: index_docs, skipmeta, source", value[varargs].data);
 
     return NGX_CONF_ERROR;
 }
 
-// static ngx_int_t
-// ngx_http_elastic_client_header_filter(ngx_http_request_t *r) {
-//     ngx_http_elastic_client_loc_conf_t *hwlcf;
-//     ngx_http_elastic_client_ctx_t       *ctx;
+static ngx_int_t
+ngx_http_elastic_client_header_filter(ngx_http_request_t *r) {
+    ngx_http_elastic_client_loc_conf_t *eclcf;
+    ngx_http_elastic_client_ctx_t       *ctx;
 
-//     hwlcf = ngx_http_get_module_loc_conf(r, ngx_http_elastic_client_module);
+    eclcf = ngx_http_get_module_loc_conf(r, ngx_http_elastic_client_module);
 
-//     if (r->headers_out.status == NGX_HTTP_NOT_MODIFIED
-//             || r->headers_out.status == NGX_HTTP_NO_CONTENT
-//             || r->headers_out.status < NGX_HTTP_OK
-//             || r != r->main
-//             || r->method == NGX_HTTP_HEAD)
-//     {
-//         ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "========  head response only =============");
-//     }
+    if (r->headers_out.status == NGX_HTTP_NOT_MODIFIED
+            || r->headers_out.status == NGX_HTTP_NO_CONTENT
+            || r->headers_out.status < NGX_HTTP_OK
+            || r != r->main
+            || r->method == NGX_HTTP_HEAD)
+    {
+        ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "========  head response only =============");
+    }
 
-//     if (hwlcf->resp_opt != NGX_HTTP_ELASTIC_CLIENT_DOCTYPEJSON_RESP/*
-//             || r->headers_out.content_type.len != sizeof("application/json") - 1
-//             || ngx_strncmp(r->headers_out.content_type.data, "application/json",
-//                            r->headers_out.content_type.len) != 0*/) {
-//         return ngx_http_next_header_filter(r);
-//     }
+    if (eclcf->resp_opt != NGX_HTTP_ELASTIC_CLIENT_INDEXDOCLIST_RESP/*
+            || r->headers_out.content_type.len != sizeof("application/json") - 1
+            || ngx_strncmp(r->headers_out.content_type.data, "application/json",
+                           r->headers_out.content_type.len) != 0*/) {
+        goto SKIP_DOCLIST_FILTER;
+    }
 
-//     // Response Json content type only
-//     // r->headers_out.content_type_len = sizeof("application/json") - 1;
-//     // ngx_str_set(&r->headers_out.content_type, "application/json");
-
-
+    // Response Json content type only
+    // r->headers_out.content_type_len = sizeof("application/json") - 1;
+    // ngx_str_set(&r->headers_out.content_type, "application/json");
 
 
-//     if (r->header_only) {
-//         return ngx_http_next_header_filter(r);
-//     }
-
-//     ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_elastic_client_ctx_t));
-//     if (ctx == NULL) {
-//         return NGX_ERROR;
-//     }
-
-//     ctx->length = r->headers_out.content_length_n;
-//     if (!ctx->saved_buf) {
-//         ctx->saved_buf = ngx_calloc_buf(r->pool);
-//         ctx->saved_buf->pos = ngx_palloc(r->pool, ctx->length);
-//         ctx->saved_buf->start = ctx->saved_buf->last = ctx->saved_buf->pos;
-//         ctx->saved_buf->end = ctx->saved_buf->pos + ctx->length;
-//     }
-
-//     ngx_http_set_ctx(r, ctx, ngx_http_elastic_client_module);
-
-//     r->filter_need_in_memory = 1;
-
-//     // if (r == r->main) {
-
-//     ngx_http_clear_content_length(r);
-//     ngx_http_clear_accept_ranges(r);
-//     ngx_http_weak_etag(r);
-//     // }
 
 
-//     return ngx_http_next_header_filter(r);
-// }
+    if (r->header_only) {
+        return ngx_http_next_header_filter(r);
+    }
 
-// static void
-// ngx_http_elastic_client_doctype_parser(ngx_http_request_t *r, ngx_buf_t *b, u_char *p, size_t buf_size ) {
-//     u_char *l = NULL;
-//     u_char *out;
+    ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_elastic_client_ctx_t));
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
 
-//     b->start = b->pos = out = ngx_palloc(r->pool, buf_size);
-//     b->end = b->start + buf_size;
+    ctx->length = r->headers_out.content_length_n;
+    if (!ctx->saved_buf) {
+        ctx->saved_buf = ngx_calloc_buf(r->pool);
+        ctx->saved_buf->pos = ngx_palloc(r->pool, ctx->length);
+        ctx->saved_buf->start = ctx->saved_buf->last = ctx->saved_buf->pos;
+        ctx->saved_buf->end = ctx->saved_buf->pos + ctx->length;
+    }
 
-//     if (out) {
-//         out = ngx_copy(out, "{\"docs\":[", sizeof("{\"docs\":[") - 1);
+    ngx_http_set_ctx(r, ctx, ngx_http_elastic_client_module);
 
-//         l = p = (u_char*) ngx_strstr(p, "},{\"_source\"") + 14;
+SKIP_DOCLIST_FILTER:
+    r->filter_need_in_memory = 1;
 
-//         for (;;) {
-//             l = (u_char*)ngx_strstr(l, "},{\"_source\"");
-//             if (!l) {
-//                 out = ngx_copy(out, "{", 1);
-//                 out = ngx_copy(out, p, (u_char*)strrchr((const char *) p, ']') - 1 - p );
-//                 out = ngx_copy(out, "]}", 2);
-//                 break;
-//             }
-//             out = ngx_copy(out, "{", 1);
-//             out = ngx_copy(out, p, l - p);
-//             out = ngx_copy(out, ",", 1);
-//             p = l = l + 14;
-//         }
-//     }
-//     b->last = out;
-// }
+    // if (r == r->main) {
 
-// static ngx_int_t
-// ngx_http_elastic_client_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
-
-//     ngx_int_t                   rc;
-//     ngx_buf_t                  *b;
-//     ngx_chain_t                *cl, *tl, *out, **ll;
-//     ngx_http_elastic_client_ctx_t  *ctx;
-
-//     ctx = ngx_http_get_module_ctx(r, ngx_http_elastic_client_module);
-//     if (ctx == NULL) {
-//         ctx = ngx_pcalloc(r->pool, sizeof(ngx_http_elastic_client_ctx_t));
-//         if (ctx == NULL) {
-//             return NGX_ERROR;
-//         }
-
-//         ngx_http_set_ctx(r, ctx, ngx_http_elastic_client_module);
-//     }
-
-//     /* create a new chain "out" from "in" with all the changes */
-
-//     ll = &out;
-
-//     for (cl = in; cl; cl = cl->next) {
-
-//         ctx->saved_buf->last = ngx_copy(ctx->saved_buf->last, cl->buf->pos, ngx_buf_size(cl->buf));
-//         /* loop until last buf then we do the json parsing */
-//         if (cl->buf->last_buf) {
-//             // ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Buff= %*s", ctx->saved_buf->last - ctx->saved_buf->pos , ctx->saved_buf->pos);
-
-//             tl = ngx_chain_get_free_buf(r->pool, &ctx->free);
-//             if (tl == NULL) {
-//                 return NGX_ERROR;
-//             }
-
-//             *ctx->saved_buf->last = '\0'; // set NULL terminator
-//             b = tl->buf;
-
-//             ngx_http_elastic_client_doctype_parser(r, b, ctx->saved_buf->pos, ctx->saved_buf->last - ctx->saved_buf->pos);
-
-//             b->tag = (ngx_buf_tag_t) &ngx_http_elastic_client_module;
-//             b->temporary = 1;
-
-//             // b->pos = ctx->saved_buf->pos;
-//             // b->last = ctx->saved_buf->last;
-//             // b->start = ctx->saved_buf->start;
-//             // b->end = ctx->saved_buf->end;
-//             b->last_buf = 1;
+    ngx_http_clear_content_length(r);
+    ngx_http_clear_accept_ranges(r);
+    ngx_http_weak_etag(r);
+    // }
 
 
-//             *ll = tl;
-//             ll = &tl->next;
-//             CLEAR_BUF(cl->buf);
-//             goto out_result;
-//         }
+    return ngx_http_next_header_filter(r);
+}
 
-//         CLEAR_BUF(cl->buf); // clear current buffer
+static ngx_int_t
+ngx_index_docs_parser(ngx_http_request_t *r, ngx_buf_t *b, u_char *p, size_t buf_size ) {
 
-//         /* append the next incoming buffer */
+    u_char *out;
+    if (!b) {
+        b = ngx_calloc_buf(r->pool);
+    }
+    b->start = b->pos = out = ngx_palloc(r->pool, buf_size);
+    b->end = b->start + buf_size;
+    ngx_str_t *index_str;
+    u_char *_index;
+    u_char *_source;
+    size_t curr_size, index_len, i = 0, index_size = 10;
 
-//         // tl = ngx_alloc_chain_link(r->pool);
-//         // if (tl == NULL) {
-//         //     return NGX_ERROR;
-//         // }
+    ngx_str_t* index_buckets = ngx_pcalloc( r->pool, index_size * sizeof(ngx_str_t));
 
-//         // tl->buf = cl->buf;
-//         // *ll = tl;
-//         // ll = &tl->next;
-//     }
-// out_result:
-//     *ll = NULL;
+    out = ngx_copy(out, OBJ_BRACKET_OPEN, 1);
 
-//     /* send the new chain */
+    if ((_index = (u_char*)ngx_strstr(p, FIRST_INDEX))) {
+        _index = _index + SIZEOF_FIRSTINDEX;
+        if ((_source = (u_char*)ngx_strstr(_index, _SOURCE))) {
+            index_len = _source - _index - 1;
+            out = ngx_copy(out, DOUBLE_QUOTE, 1);
+            out = ngx_copy(out, _index, index_len);
+            out = ngx_copy(out, DOUBLE_QUOTE_COLON, 2);
+            out = ngx_copy(out, ARRAY_BRACKET_OPEN, 1);
+            index_str = &index_buckets[i++];
+            index_str->data = _index;
+            index_str->len = index_len;
+            _source = _source + SIZEOF_SOURCE;
 
-//     rc = ngx_http_next_body_filter(r, out);
+            for (; (_index = (u_char*)ngx_strstr(_source, FOLLOW_INDEX)); i++ ) {
+                out = ngx_copy(out, _source, _index - _source - 1);
 
-//     /* update "busy" and "free" chains for reuse */
+                _index = _index + SIZEOF_FOLLOWINDEX;
+                if (i >= index_size) {
+                    curr_size = index_size * sizeof(ngx_str_t);
+                    index_buckets = ngx_elasic_client_index_realloc(r, index_buckets, curr_size, curr_size * 2);
+                    if (!index_buckets)
+                        return NGX_ERROR;
+                    index_size *= 2;
+                }
 
-//     ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &out,
-//                             (ngx_buf_tag_t) &ngx_http_elastic_client_module);
+                if ((_source = (u_char*)ngx_strstr(_index, _SOURCE))) {
+                    index_len = _source - _index - 1;
+                    if ( !(is_index_existed(index_buckets, i, _index, index_len)) ) {
+                        /** new index **/
+                        out = ngx_copy(out, ARRAY_BRACKET_CLOSED, 1);
+                        out = ngx_copy(out, COMMA, 1);
+                        out = ngx_copy(out, DOUBLE_QUOTE, 1);
+                        out = ngx_copy(out, _index, index_len);
+                        out = ngx_copy(out, DOUBLE_QUOTE_COLON, 2);
+                        out = ngx_copy(out, ARRAY_BRACKET_OPEN, 1);
+                    } else {
+                        out = ngx_copy(out, COMMA, 1);
+                    }
+                    _source = _source + SIZEOF_SOURCE;
+                }
+                index_str = &index_buckets[i];
+                index_str->data = _index;
+                index_str->len = index_len;
+            }
 
-//     return rc;
-// }
+            // LAST Source
+            int source_open_close = 0;
+            size_t n = b->end - _source;
+            register const u_char *__p = _source;
+            for (; n != 0; n--) {
+                if (*__p == '{')
+                    source_open_close++;
+                else if (*__p == '}')
+                    source_open_close--;
+
+                __p++;
+                if (source_open_close == 0)
+                    break;
+            }
+            out = ngx_copy(out, _source, __p - _source  );
+            out = ngx_copy(out, ARRAY_BRACKET_CLOSED, 1);
+        }
+    }
+
+
+    out = ngx_copy(out, OBJ_BRACKET_CLOSED, 1);
+    b->last = out;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_http_elastic_client_body_filter(ngx_http_request_t *r, ngx_chain_t *in) {
+    ngx_http_elastic_client_loc_conf_t *eclcf;
+
+    eclcf = ngx_http_get_module_loc_conf(r, ngx_http_elastic_client_module);
+
+    if (eclcf->resp_opt != NGX_HTTP_ELASTIC_CLIENT_INDEXDOCLIST_RESP) {
+        return ngx_http_next_body_filter(r, in);
+    }
+
+    ngx_int_t                   rc;
+    ngx_buf_t                  *b;
+    ngx_chain_t                *cl, *tl, *out, **ll;
+    ngx_http_elastic_client_ctx_t  *ctx;
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_elastic_client_module);
+    if (ctx == NULL) {
+        return NGX_ERROR;
+    }
+
+    /* create a new chain "out" from "in" with all the changes */
+
+    ll = &out;
+
+    for (cl = in; cl; cl = cl->next) {
+
+        ctx->saved_buf->last = ngx_copy(ctx->saved_buf->last, cl->buf->pos, ngx_buf_size(cl->buf));
+        /* loop until last buf then we do the json parsing */
+        if (cl->buf->last_buf) {
+
+            tl = ngx_chain_get_free_buf(r->pool, &ctx->free);
+            if (tl == NULL) {
+                return NGX_ERROR;
+            }
+
+            // *ctx->saved_buf->last = '\0'; // set NULL terminator
+            b = tl->buf;
+
+            ngx_index_docs_parser(r, b, ctx->saved_buf->pos, ctx->saved_buf->last - ctx->saved_buf->pos);
+
+            b->tag = (ngx_buf_tag_t) &ngx_http_elastic_client_module;
+            b->temporary = 1;
+            b->last_buf = 1;
+            // ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "Buff= %O", b->last - b->pos );
+            // ngx_log_error(NGX_LOG_INFO, r->connection->log, 0, "cxt->length= %O", ctx->length );
+
+
+            *ll = tl;
+            ll = &tl->next;
+            CLEAR_BUF(cl->buf);
+            goto out_result;
+        }
+
+        CLEAR_BUF(cl->buf); // clear current buffer
+
+    }
+out_result:
+    *ll = NULL;
+
+    /* send the new chain */
+
+    rc = ngx_http_next_body_filter(r, out);
+
+    /* update "busy" and "free" chains for reuse */
+
+    ngx_chain_update_chains(r->pool, &ctx->free, &ctx->busy, &out,
+                            (ngx_buf_tag_t) &ngx_http_elastic_client_module);
+
+    return rc;
+}
