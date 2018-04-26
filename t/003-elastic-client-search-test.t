@@ -1,7 +1,7 @@
 # vi:filetype=perl
 
-use lib '/home/dispatch/testMap/c-lib/test-nginx/inc';
-use lib '/home/dispatch/testMap/c-lib/test-nginx/lib';
+use lib 'inc';
+use lib 'lib';
 use Test::Nginx::Socket 'no_plan';
 
 
