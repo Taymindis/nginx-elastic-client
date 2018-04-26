@@ -10,7 +10,7 @@ Table of Contents
 * [Usage](#usage)
 * [Installation](#installation)
 * [Test](#test)
-* [Why need this](#whyneedthis)
+* [Why need this](#why-need-this)
 * [Support](#support)
 * [Copyright & License](#copyright--license)
 
