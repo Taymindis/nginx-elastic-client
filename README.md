@@ -48,7 +48,7 @@ server {
 ```
 
 
-### 2. Proxy pass to the elastic host, using all are the same variable with what client passed
+### 2. If you don't want any command inside config, just pass whatever and proxy pass to the elastic host, please setup the config below.
 ```nginx
 # nginx.conf
 
