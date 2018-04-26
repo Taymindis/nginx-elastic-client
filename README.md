@@ -82,7 +82,27 @@ server {
 ```
 
 
-### 5. search all but skipmeta data, keep index, type, and id.
+### 5. search all but group the docs by index.
+```nginx
+# nginx.conf
+
+server {
+    ....
+     location /test {
+        elastic_pass http://elastic_upstream;
+        elastic_send POST /testindex/testdoc/_search?size=100 index_docs;
+        
+        elastic_query '{"query":
+           {
+            "match_all": {}
+           }
+        }';
+    }
+}
+```
+
+
+### 6. search all but skipmeta data, keep index, type, and id.
 ```nginx
 # nginx.conf
 
@@ -102,7 +122,7 @@ server {
 ```
 
 
-### 6. search all but source only data.
+### 7. search all but source only data.
 ```nginx
 # nginx.conf
 
@@ -122,7 +142,7 @@ server {
 ```
 
 
-### 7. search with dynamic input.
+### 8. search with dynamic input.
 ```nginx
 # nginx.conf
 
@@ -143,7 +163,7 @@ server {
 ```
 
 
-### 7. Delete index.
+### 9. Delete index.
 ```nginx
 # nginx.conf
 
