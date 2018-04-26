@@ -22,7 +22,7 @@ nginx-elastic-client is a nginx module which allow to proxy to elastic server wi
 
 Usage
 =======
-### 1. Setup your elastic upstream
+### 0. Setup your elastic upstream
 ```nginx
 # nginx.conf
   upstream elastic_upstream {
@@ -30,7 +30,8 @@ Usage
   }
 ```
 
-### 2. Simple create index command, please noted that http method is defined inside command, it regardless what you called to nginx.
+
+### 1. Simple create index command, please noted that http method is defined inside command, it regardless what you called to nginx.
 ```nginx
 # nginx.conf
 
@@ -45,6 +46,23 @@ server {
     }
 }
 ```
+
+
+### 2. Proxy pass to the elastic host, using all are the same variable with what client passed
+```nginx
+# nginx.conf
+
+server {
+  ....
+  
+  location / {
+      elastic_pass http://elastic_upstream;
+      elastic_send $request_method $uri?$query_string; 
+      elastic_query $request_body;
+  }
+}
+```
+
 
 ### 3. Create index based on your args, for example /test?new_id=Staff1232
 ```nginx
