@@ -3,7 +3,7 @@
 * @author taymindis <cloudleware2015@gmail.com>
 * @date   Sun JAN 28 12:06:52 2018
 *
-* @brief  A ngx_c_function module for Nginx.
+* @brief  A nginx-elastic-client module for Nginx.
 *
 * @section LICENSE
 *
