@@ -48,7 +48,7 @@ server {
 ```
 
 
-### 2. If you don't want any command inside config, just pass ngixn variables to the elastic host, please setup the config below, you may refer the nginx variable [nginx variables](https://gist.github.com/esfand/8262283)  for more details
+### 2. If you don't want any command inside config, just pass ngixn variables to the elastic host, please setup the config below, you may refer the [nginx variables](https://gist.github.com/esfand/8262283)  for more details
 ```nginx
 # nginx.conf
 
